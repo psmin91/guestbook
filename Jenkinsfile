@@ -11,7 +11,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                git credentialsId: '78a69571-9ce8-4e06-a9d5-2629710a9482', url: 'http://git.biz-think.net/system/jenkins_10059.git'
+		git branch: 'main', credentialsId: 'github_token', url: 'https://github.com/psmin91/guestbook'
             }
         }
         stage('Build') {

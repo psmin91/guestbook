@@ -1,19 +1,16 @@
-// when과 parameter를 이용하여 특정 Stage 건너뛰기
 pipeline {
     agent any
-    parameters {
-        booleanParam(name: 'BUILD_DOCKER_IMAGE', 
-                    defaultValue: true, 
-                    description: 'Docker Image Build')
+    environment { 
+        CC = 'clang'
     }
-
     stages {
-        stage('Docker Image Build') {
-            when { expression { return params.BUILD_DOCKER_IMAGE }} 
+        stage('Example') {
+            environment { 
+                AN_ACCESS_KEY = credentials('my-predefined-secret-text') 
+            }
             steps {
-                echo 'Docker Image Build...'
+                sh 'printenv'
             }
         }
     }
 }
-

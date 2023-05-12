@@ -3,7 +3,7 @@ import java.text.SimpleDateFormat
 def TODAY = (new SimpleDateFormat("yyyyMMddHHmmss")).format(new Date())
 
 pipeline {
-    agent { label 'master' }
+    agent any
     environment {
         strDockerTag = "${TODAY}_${BUILD_ID}"
         strDockerImage ="psmin91/cicd_guestbook:${strDockerTag}"
@@ -11,129 +11,68 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            agent { label 'agent1' }
             steps {
-                git branch: 'main', credentialsId: 'github_token', url: 'https://github.com/psmin91/guestbook'
+                git branch: 'main', url:'https://github.com/psmin91/guestbook.git'
+
+                dir('/home/ec2-user/lab/projects/guestbook-config'){
+                    git branch: 'master', url:'https://github.com/yu3papa/guestbook-config.git'
+                }
             }
-        }
-        stage('Build') {
-            agent { label 'agent1' }
-            steps {
-                sh './mvnw clean package'
-            }
-        }
-        stage('Unit Test') {
-            agent { label 'agent1' }
-            steps {
-                sh './mvnw test'
-            }
-            
-            // post {
-            //     always {
-            //         junit '**/target/surefire-reports/TEST-*.xml'
-            //     }
-            // }
         }
 
-        stage('SonarQube Analysis') {
-            agent { label 'agent1' }
-            steps{
-                echo 'SonarQube Analysis'
-                /*
-                withSonarQubeEnv('SonarQube-Server'){
-                    sh '''
-                        ./mvnw sonar:sonar \
-                        -Dsonar.projectKey=guestbook \
-                        -Dsonar.host.url=http://192.168.56.143:9000 \
-                        -Dsonar.login=21193ff67973f0efc068ac33ce547e3da8c671b7
-                    '''
-                }
-                */
-            }
-        }
-        stage('SonarQube Quality Gate'){
-            agent { label 'agent1' }
-            steps{
-                echo 'SonarQube Quality Gate'
-                /*
-                timeout(time: 1, unit: 'MINUTES') {
-                    script{
-                        def qg = waitForQualityGate()
-                        if(qg.status != 'OK') {
-                            echo "NOT OK Status: ${qg.status}"
-                            error "Pipeline aborted due to quality gate failure: ${qg.status}"
-                        } else{
-                            echo "OK Status: ${qg.status}"
-                        }
-                    }
-                }
-                */
-            }
-        }
-        stage('Docker Image Build') {
-            agent { label 'agent2' }
+        stage('Build') {
             steps {
-                git branch: 'main', credentialsId: 'github_token', url: 'https://github.com/psmin91/guestbook'
                 sh './mvnw clean package'
+            }
+        }
+
+        stage('Docker Image Build') {
+            steps {
                 script {
-                    //oDockImage = docker.build(strDockerImage)
                     oDockImage = docker.build(strDockerImage, "--build-arg VERSION=${strDockerTag} -f Dockerfile .")
                 }
             }
         }
+
         stage('Docker Image Push') {
-            agent { label 'agent2' }
             steps {
                 script {
-                    docker.withRegistry('', 'DockerHub_psmin91') {
+                    docker.withRegistry('', 'docker_hub') {
                         oDockImage.push()
                     }
                 }
             }
         }
-        stage('Staging Deploy') {
-            agent { label 'master' }
+
+        stage('Config-Repo PUSH') {
+            environment {
+                GITHUB_ACCESS_TOKEN = credentials('github_token')
+            }
             steps {
-                sshagent(credentials: ['Staging-PrivateKey']) {
-                    sh "ssh -o StrictHostKeyChecking=no root@43.201.72.54 docker container rm -f guestbookapp"
-                    sh "ssh -o StrictHostKeyChecking=no root@43.201.72.54 docker container run \
-                                        -d \
-                                        -p 38080:80 \
-                                        --name=guestbookapp \
-                                        -e MYSQL_IP=3.35.53.130 \
-                                        -e MYSQL_PORT=3306 \
-                                        -e MYSQL_DATABASE=guestbook \
-                                        -e MYSQL_USER=root \
-                                        -e MYSQL_PASSWORD=education \
-                                        ${strDockerImage} "
+                dir('/home/ec2-user/lab/projects/guestbook-config'){
+                    sh '''
+                        sed -i "s/cicd_guestbook:.*/cicd_guestbook:${strDockerTag}/g" guestbook/guestbook_deploy.yaml
+                        git add guestbook/guestbook_deploy.yaml
+                        git commit -m "[UPDATE] guestbook image tag - ${strDockerImage} (by jenkins)"
+                        git push "https://psmin91:${GITHUB_ACCESS_TOKEN}@github.com/psmin91/guestbook-config.git"
+                    '''
                 }
             }
         }
-        stage ('JMeter LoadTest') {
-            agent { label 'agent1' }
-            steps { 
-                sh '~/lab/sw/jmeter/bin/jmeter.sh -j jmeter.save.saveservice.output_format=xml -n -t src/main/jmx/guestbook_loadtest.jmx -l loadtest_result.jtl' 
-                perfReport filterRegex: '', showTrendGraphs: true, sourceDataFiles: 'loadtest_result.jtl' 
-            } 
-        }
-    }
-    post { 
-        always { 
-            emailext (attachLog: true, body: '본문', compressLog: true
-                    , recipientProviders: [buildUser()], subject: '제목', to: 'yu3papa.j@gmail.com')
 
+        stage('ArgoCD Sync') {
+            environment {
+                ARGOCD_API_TOKEN = credentials('argocd-api-token')
+            }
+            steps {
+                sh '''
+                    TOKEN="${ARGOCD_API_TOKEN}"
+                    PAYLOAD='{"prune": true}'
+                    curl -v -k -XPOST \
+                        -H "Authorization: Bearer ${TOKEN}" \
+                        https://43.202.33.140/api/v1/applications/guestbook/sync
+                '''
+            }
         }
-        success { 
-            slackSend(tokenCredentialId: 'slack-token'
-                , channel: '#edu'
-                , color: 'good'
-                , message: "${JOB_NAME} (${BUILD_NUMBER}) 빌드가 성공적으로 끝났습니다. Details: (<${BUILD_URL} | here >)")
-        }
-        failure { 
-            slackSend(tokenCredentialId: 'slack-token'
-                , channel: '#edu'
-                , color: 'danger'
-                , message: "${JOB_NAME} (${BUILD_NUMBER}) 빌드가 실패하였습니다. Details: (<${BUILD_URL} | here >)")
     }
-  }
 }
